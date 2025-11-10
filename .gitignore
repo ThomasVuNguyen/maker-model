@@ -4,3 +4,5 @@ outputs/
 lora_model/
 *checkpoints/
 .env
+tinker-env/
+__pycache__/
