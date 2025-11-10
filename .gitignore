@@ -3,3 +3,4 @@ unsloth*/
 outputs/
 lora_model/
 *checkpoints/
+.env

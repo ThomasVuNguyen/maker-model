@@ -10,17 +10,39 @@ import json
 import subprocess
 import tempfile
 import time
+import threading
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datasets import load_dataset
 from tqdm import tqdm
+from dotenv import load_dotenv
+import openai
+
+# Load environment variables
+load_dotenv()
 
 # Configuration
-DATASET_NAME = "ThomasTheMaker/Synthetic-Object-v0"
-MODEL_NAME = "gemma3:27b"  # Ollama model to use
+DATASET_NAME = "ThomasTheMaker/Synthetic-Object"
+MODEL_NAME = "moonshotai/Kimi-K2-Instruct"  # API model to use
 OUTPUT_FILE = "generated_dataset.json"
 OPENSCAD_TIMEOUT = 10  # seconds
 NUM_SAMPLES = None  # Number of samples to process (set to None for all)
 MAX_RETRIES = 5  # Maximum number of regeneration attempts if validation fails
+PARALLEL_WORKERS = 10  # Number of parallel API calls
+
+# Initialize OpenAI client
+RIFT_API_KEY = os.getenv("RIFT_API_KEY")
+if not RIFT_API_KEY:
+    print("❌ RIFT_API_KEY not found in .env file")
+    exit(1)
+
+client = openai.OpenAI(
+    api_key=RIFT_API_KEY,
+    base_url="https://inference.cloudrift.ai/v1"
+)
+
+# Thread lock for safe checkpoint saving
+checkpoint_lock = threading.Lock()
 
 # Prompt template for generating OpenSCAD code
 PROMPT_TEMPLATE = """You are an expert OpenSCAD programmer. Generate valid OpenSCAD code to create a 3D model of: {name}
@@ -35,30 +57,30 @@ Requirements:
 Generate ONLY the OpenSCAD code, no explanations:"""
 
 
-def call_ollama(prompt, model=MODEL_NAME):
-    """Call Ollama to generate code."""
+def call_api(prompt, model=MODEL_NAME):
+    """Call OpenAI-compatible API to generate code."""
     try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt,
-            text=True,
-            capture_output=True,
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            stream=False,
             timeout=60
         )
 
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            print(f"❌ Ollama error: {result.stderr}")
-            return None
-    except subprocess.TimeoutExpired:
-        print("⏱️ Ollama timeout")
-        return None
-    except FileNotFoundError:
-        print("❌ Ollama not found. Install it from https://ollama.ai")
+        # Get the response content
+        if hasattr(completion, 'choices') and len(completion.choices) > 0:
+            message = completion.choices[0].message
+            if hasattr(message, 'content') and message.content:
+                return message.content.strip()
+
+        print(f"❌ API returned empty response")
         return None
     except Exception as e:
-        print(f"❌ Error calling Ollama: {e}")
+        print(f"❌ API error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -163,7 +185,7 @@ def generate_and_validate(name, max_retries=MAX_RETRIES):
 
         # Call LLM
         print(f"🤖 Calling {MODEL_NAME}...")
-        response = call_ollama(prompt)
+        response = call_api(prompt)
 
         if not response:
             print(f"❌ Failed to generate code")
@@ -203,20 +225,60 @@ def generate_and_validate(name, max_retries=MAX_RETRIES):
     return None, f"Failed validation after {max_retries} attempts"
 
 
+def load_checkpoint():
+    """Load existing results from checkpoint file if it exists."""
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, 'r') as f:
+                results = json.load(f)
+            completed_names = {r["name"] for r in results}
+            print(f"📂 Found existing checkpoint: {len(results)} items already completed")
+            return results, completed_names
+        except Exception as e:
+            print(f"⚠️  Could not load checkpoint: {e}")
+            return [], set()
+    return [], set()
+
+
+def save_checkpoint(results):
+    """Save current results to checkpoint file (thread-safe)."""
+    with checkpoint_lock:
+        with open(OUTPUT_FILE, 'w') as f:
+            json.dump(results, f, indent=2)
+
+
+def process_item(example):
+    """Process a single dataset item (designed to run in parallel)."""
+    name = example["name"]
+    original_code = example.get("code", "")
+
+    # Generate new code with retries
+    generated_code, status = generate_and_validate(name)
+
+    if generated_code:
+        return {
+            "success": True,
+            "data": {
+                "name": name,
+                "code": generated_code,
+                "original_code": original_code,
+                "status": status,
+                "valid": True
+            },
+            "needed_retry": "attempt" in status.lower()
+        }
+    else:
+        return {
+            "success": False,
+            "name": name,
+            "error": status
+        }
+
+
 def main():
     print("\n" + "="*60)
     print("CadMonkey Dataset Generator")
     print("="*60 + "\n")
-
-    # Check if Ollama is installed
-    try:
-        result = subprocess.run(["ollama", "--version"], capture_output=True)
-        if result.returncode != 0:
-            print("❌ Ollama not found. Install from https://ollama.ai")
-            return
-    except FileNotFoundError:
-        print("❌ Ollama not found. Install from https://ollama.ai")
-        return
 
     # Check if OpenSCAD is installed
     try:
@@ -228,6 +290,9 @@ def main():
         print("❌ OpenSCAD not found. Install: sudo apt install openscad")
         return
 
+    # Load checkpoint if exists
+    results, completed_names = load_checkpoint()
+
     # Load dataset
     print(f"📥 Loading dataset: {DATASET_NAME}")
     dataset = load_dataset(DATASET_NAME, split="train")
@@ -236,88 +301,107 @@ def main():
     if NUM_SAMPLES:
         dataset = dataset.select(range(min(NUM_SAMPLES, len(dataset))))
 
-    print(f"📊 Processing {len(dataset)} samples\n")
+    # Filter out already completed items
+    if completed_names:
+        original_size = len(dataset)
+        dataset = dataset.filter(lambda x: x["name"] not in completed_names)
+        skipped = original_size - len(dataset)
+        print(f"⏭️  Skipping {skipped} already completed items")
+
+    print(f"📊 Processing {len(dataset)} remaining samples with {PARALLEL_WORKERS} parallel workers\n")
 
     # Generate and validate
-    results = []
     stats = {
         "total": len(dataset),
         "success": 0,
         "failed": 0,
-        "retries": 0  # Track total number of retries
+        "retries": 0,  # Track total number of retries
+        "lock": threading.Lock()  # Lock for thread-safe stats updates
     }
 
     # Track timing for ETA
     start_time = time.time()
-    times = []
 
-    for i, example in enumerate(dataset):
-        item_start = time.time()
+    # Process items in parallel
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_item, example): example for example in dataset}
 
-        name = example["name"]
-        original_code = example.get("code", "")
+        # Process results as they complete
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
 
-        # Calculate and display ETA
-        if i > 0:
-            avg_time = sum(times) / len(times)
-            remaining = len(dataset) - i
-            eta_seconds = avg_time * remaining
-            eta = timedelta(seconds=int(eta_seconds))
-            elapsed = timedelta(seconds=int(time.time() - start_time))
+            try:
+                result = future.result()
 
-            print(f"\n⏱️  Progress: {i}/{len(dataset)} | Elapsed: {elapsed} | ETA: {eta} | Avg: {avg_time:.1f}s/item")
-            print(f"📊 Current stats: ✅ {stats['success']} success | ❌ {stats['failed']} failed | 🔄 {stats['retries']} retries")
+                # Update stats in thread-safe manner
+                with stats["lock"]:
+                    if result["success"]:
+                        results.append(result["data"])
+                        stats["success"] += 1
+                        if result["needed_retry"]:
+                            stats["retries"] += 1
 
-        # Generate new code with retries
-        generated_code, status = generate_and_validate(name)
+                        # Save checkpoint after each success
+                        try:
+                            save_checkpoint(results)
+                            print(f"💾 Checkpoint saved: {result['data']['name']} ({len(results)} items total)")
+                        except Exception as e:
+                            print(f"⚠️  Failed to save checkpoint: {e}")
+                    else:
+                        stats["failed"] += 1
+                        print(f"⏭️ Skipping {result['name']} due to validation failure: {result['error']}")
 
-        if generated_code:
-            results.append({
-                "name": name,
-                "code": generated_code,
-                "original_code": original_code,
-                "status": status,
-                "valid": True
-            })
-            stats["success"] += 1
+                # Display progress
+                elapsed = timedelta(seconds=int(time.time() - start_time))
+                avg_time = (time.time() - start_time) / completed
+                remaining = len(dataset) - completed
+                eta_seconds = avg_time * remaining
+                eta = timedelta(seconds=int(eta_seconds))
 
-            # Track if retries were needed (check if status mentions "attempt")
-            if "attempt" in status.lower():
-                stats["retries"] += 1
-        else:
-            stats["failed"] += 1
-            print(f"⏭️ Skipping {name} due to validation failure: {status}")
+                print(f"\n⏱️  Progress: {completed}/{len(dataset)} | Elapsed: {elapsed} | ETA: {eta} | Avg: {avg_time:.1f}s/item")
+                print(f"📊 Stats: ✅ {stats['success']} success | ❌ {stats['failed']} failed | 🔄 {stats['retries']} retries")
 
-        # Track time for this item
-        item_time = time.time() - item_start
-        times.append(item_time)
-
-        # Keep only last 10 times for rolling average
-        if len(times) > 10:
-            times.pop(0)
+            except Exception as e:
+                print(f"❌ Error processing item: {e}")
+                with stats["lock"]:
+                    stats["failed"] += 1
 
     # Calculate total time
     total_time = time.time() - start_time
     total_time_str = str(timedelta(seconds=int(total_time)))
 
-    # Save results
+    # Final save
     print(f"\n{'='*60}")
-    print("Saving results...")
+    print("Finalizing results...")
     print('='*60)
 
-    with open(OUTPUT_FILE, 'w') as f:
-        json.dump(results, f, indent=2)
+    try:
+        save_checkpoint(results)
+        print(f"✅ Final dataset saved to: {OUTPUT_FILE}")
+    except Exception as e:
+        print(f"❌ Failed to save final results: {e}")
 
-    print(f"\n✅ Dataset saved to: {OUTPUT_FILE}")
-    print(f"⏱️  Total time: {total_time_str}")
-    print(f"📊 Statistics:")
-    print(f"   Total:           {stats['total']}")
-    print(f"   Success:         {stats['success']} ({stats['success']/stats['total']*100:.1f}%)")
-    print(f"   Failed:          {stats['failed']} ({stats['failed']/stats['total']*100:.1f}%)")
+    # Calculate overall statistics (including previously completed items)
+    total_in_dataset = len(results)
+    success_this_run = stats['success']
+    failed_this_run = stats['failed']
+
+    print(f"\n⏱️  Session time: {total_time_str}")
+    print(f"📊 Session Statistics:")
+    print(f"   Processed:       {stats['total']} items this session")
+    print(f"   Success:         {success_this_run} ({success_this_run/max(stats['total'], 1)*100:.1f}%)")
+    print(f"   Failed:          {failed_this_run} ({failed_this_run/max(stats['total'], 1)*100:.1f}%)")
     print(f"   Needed retries:  {stats['retries']} items required regeneration")
     if times:
         avg_time = sum(times) / len(times)
         print(f"   Avg time:        {avg_time:.1f}s per item")
+
+    print(f"\n📊 Total Dataset Statistics:")
+    print(f"   Total items:     {total_in_dataset}")
+    print(f"   Dataset file:    {OUTPUT_FILE}")
+
     print("\n" + "="*60 + "\n")
 
 
