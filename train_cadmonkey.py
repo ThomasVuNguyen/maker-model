@@ -6,6 +6,9 @@ Fine-tune Llama 3.2 1B on OpenSCAD code generation
 import os
 import glob
 import torch
+import random
+import subprocess
+from datetime import datetime
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template, train_on_responses_only
 from datasets import load_dataset
@@ -46,6 +49,25 @@ MAX_NEW_TOKENS = 2048  # Allow longer code generation
 # Paths
 OUTPUT_DIR = "outputs"
 LORA_MODEL_DIR = "lora_model"
+EVAL_OUTPUT_DIR = "eval_outputs"
+
+# OpenSCAD rendering configuration
+OPENSCAD_BINARY = "openscad"  # Change to full path if not in PATH
+RENDER_TIMEOUT = 30  # seconds per render
+IMAGE_SIZE = "800,600"  # width,height
+ENABLE_RENDERING = False  # Set to True when xvfb is installed
+
+# Evaluation prompts
+EVAL_PROMPTS = [
+    "hey cadmonkey, create me a sphere",
+    "hey cadmonkey, create me a cat",
+    "hey cadmonkey, create me a cylinder",
+    "hey cadmonkey, create me a cube",
+    "hey cadmonkey, create me a house",
+    "hey cadmonkey, create me a car",
+    "hey cadmonkey, create me a tree",
+    "hey cadmonkey, create me a pyramid",
+]
 
 # ============================================================================
 # Helper Functions
@@ -123,6 +145,7 @@ def generate_code(model, tokenizer, prompt, stream=True):
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
         )
+        return None
     else:
         outputs = model.generate(
             input_ids=inputs,
@@ -133,8 +156,295 @@ def generate_code(model, tokenizer, prompt, stream=True):
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
         )
-        result = tokenizer.batch_decode(outputs)
-        return result
+        result = tokenizer.batch_decode(outputs, skip_special_tokens=False)
+        return result[0] if result else ""
+
+def create_eval_folder():
+    """Create a uniquely numbered evaluation output folder."""
+    os.makedirs(EVAL_OUTPUT_DIR, exist_ok=True)
+
+    # Generate a random 6-digit number + timestamp for uniqueness
+    random_id = random.randint(100000, 999999)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_name = f"eval_{timestamp}_{random_id}"
+    folder_path = os.path.join(EVAL_OUTPUT_DIR, folder_name)
+
+    os.makedirs(folder_path, exist_ok=True)
+    print(f"\n📁 Created evaluation folder: {folder_path}")
+    return folder_path
+
+def extract_code_from_response(response):
+    """Extract just the OpenSCAD code from the model response."""
+    import re
+
+    # Step 1: Extract content after assistant header if present
+    if "<|start_header_id|>assistant<|end_header_id|>" in response:
+        parts = response.split("<|start_header_id|>assistant<|end_header_id|>")
+        response = parts[-1] if len(parts) > 1 else response
+
+    # Step 2: Remove the chat template header junk (system/user text that appears as regular tokens)
+    # Look for where the actual code starts
+    lines = response.split('\n')
+    start_idx = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Skip empty lines, system/user/assistant keywords, and metadata
+        if not stripped or stripped in ['system', 'user', 'assistant'] or \
+           'Cutting Knowledge Date:' in line or 'Today Date:' in line or \
+           stripped.endswith('assistant'):
+            continue
+        # Found first line of actual content
+        start_idx = i
+        break
+
+    lines = lines[start_idx:]
+    response = '\n'.join(lines)
+
+    # Step 3: Remove special tokens
+    for token in ["<|eot_id|>", "<|end_of_text|>", "<|eom_id|>", "<|reserved_special_token_"]:
+        if token in response:
+            response = response.split(token)[0]
+
+    # Step 4: Remove garbage at the end by checking for non-ASCII or nonsense
+    lines = response.split('\n')
+    valid_lines = []
+
+    for line in lines:
+        # Check if line is mostly ASCII printable characters
+        if not line.strip():  # Keep empty lines
+            valid_lines.append(line)
+            continue
+
+        try:
+            # Calculate ratio of ASCII printable characters
+            ascii_count = sum(1 for c in line if 32 <= ord(c) < 127)
+            ascii_ratio = ascii_count / max(len(line), 1)
+
+            # If line has lots of non-ASCII or looks like garbage, stop
+            if ascii_ratio < 0.8:
+                break
+
+            # Check for common garbage patterns
+            if re.search(r'[а-яА-ЯａристиндивидуkrvldkfилактиЎыџN]{5,}', line):  # Cyrillic/garbage strings
+                break
+
+            valid_lines.append(line)
+        except:
+            break
+
+    return '\n'.join(valid_lines).strip()
+
+def render_scad_file(scad_path, output_image_path):
+    """Render a .scad file to a PNG image using OpenSCAD."""
+    try:
+        # Set environment variables for headless rendering
+        env = os.environ.copy()
+        env['LIBGL_ALWAYS_SOFTWARE'] = '1'  # Force software rendering
+        env['GALLIUM_DRIVER'] = 'softpipe'  # Use software pipe driver
+
+        # Try to use xvfb-run if available, otherwise use DISPLAY=:99
+        xvfb_available = subprocess.run(['which', 'xvfb-run'],
+                                       capture_output=True).returncode == 0
+
+        if xvfb_available:
+            cmd = [
+                'xvfb-run', '-a', '-s', '-screen 0 1024x768x24',
+                OPENSCAD_BINARY,
+                "-o", output_image_path,
+                "--imgsize", IMAGE_SIZE,
+                "--colorscheme", "BeforeDawn",
+                "--viewall",
+                "--autocenter",
+                scad_path
+            ]
+        else:
+            # Fallback: try with software rendering and fake display
+            cmd = [
+                OPENSCAD_BINARY,
+                "-o", output_image_path,
+                "--imgsize", IMAGE_SIZE,
+                "--colorscheme", "BeforeDawn",
+                "--viewall",
+                "--autocenter",
+                "--render",  # Force render mode
+                scad_path
+            ]
+            env['DISPLAY'] = ':99'  # Fake display
+
+        result = subprocess.run(
+            cmd,
+            timeout=RENDER_TIMEOUT,
+            capture_output=True,
+            text=True,
+            env=env
+        )
+
+        if result.returncode == 0 and os.path.exists(output_image_path):
+            return True, None
+        else:
+            error_msg = result.stderr if result.stderr else "Unknown error"
+            # If it's just a display error, report it differently
+            if "DISPLAY" in error_msg or "X server" in error_msg:
+                return False, "No display available (install xvfb: sudo apt install xvfb)"
+            return False, error_msg
+    except subprocess.TimeoutExpired:
+        return False, "Rendering timeout"
+    except FileNotFoundError:
+        return False, f"OpenSCAD not found at '{OPENSCAD_BINARY}'"
+    except Exception as e:
+        return False, str(e)
+
+def save_eval_results(model, tokenizer, eval_folder):
+    """Generate code for evaluation prompts and save to files."""
+    print(f"\n🧪 Running evaluation on {len(EVAL_PROMPTS)} prompts...")
+    print("="*60)
+
+    render_results = []
+
+    for i, prompt in enumerate(EVAL_PROMPTS, 1):
+        # Extract object name from prompt
+        object_name = prompt.replace("hey cadmonkey, create me a ", "").replace(" ", "_")
+
+        print(f"\n[{i}/{len(EVAL_PROMPTS)}] Generating: {object_name}")
+        print("-"*60)
+
+        # Generate code (non-streaming for saving)
+        response = generate_code(model, tokenizer, prompt, stream=False)
+        code = extract_code_from_response(response)
+
+        # Print preview
+        preview = code[:200] + "..." if len(code) > 200 else code
+        print(preview)
+
+        # Save to file
+        filename = f"{i:02d}_{object_name}.scad"
+        filepath = os.path.join(eval_folder, filename)
+
+        with open(filepath, 'w') as f:
+            f.write(f"// Generated by CadMonkey\n")
+            f.write(f"// Prompt: {prompt}\n")
+            f.write(f"// Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(code)
+
+        print(f"✓ Saved to: {filename}")
+
+        # Try to render the code (only if enabled)
+        if ENABLE_RENDERING:
+            image_filename = f"{i:02d}_{object_name}.png"
+            image_path = os.path.join(eval_folder, image_filename)
+
+            print(f"🎨 Rendering {object_name}...", end=" ")
+            success, error = render_scad_file(filepath, image_path)
+
+            if success:
+                print("✓ Rendered successfully")
+                render_results.append({
+                    "name": object_name,
+                    "filename": filename,
+                    "image": image_filename,
+                    "rendered": True,
+                    "error": None
+                })
+            else:
+                print(f"✗ Failed: {error}")
+                render_results.append({
+                    "name": object_name,
+                    "filename": filename,
+                    "image": None,
+                    "rendered": False,
+                    "error": error
+                })
+        else:
+            print(f"⏭️  Rendering disabled")
+            render_results.append({
+                "name": object_name,
+                "filename": filename,
+                "image": None,
+                "rendered": False,
+                "error": "Rendering disabled (set ENABLE_RENDERING=True to enable)"
+            })
+
+    # Generate review markdown file
+    create_review_markdown(eval_folder, render_results)
+
+    print("\n" + "="*60)
+    print(f"✅ All {len(EVAL_PROMPTS)} evaluations saved to: {eval_folder}")
+    rendered_count = sum(1 for r in render_results if r["rendered"])
+    print(f"🎨 Successfully rendered: {rendered_count}/{len(render_results)} models")
+    print("="*60)
+
+def create_review_markdown(eval_folder, render_results):
+    """Create a markdown review template."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Calculate rendering success rate
+    total = len(render_results)
+    rendered = sum(1 for r in render_results if r["rendered"])
+    render_rate = (rendered / total * 100) if total > 0 else 0
+
+    markdown_content = f"""# CadMonkey Evaluation Report
+
+**Generated at:** {timestamp}
+**Total prompts:** {total}
+
+---
+
+## Rendering Statistics
+
+- **Rendering Rate:** {render_rate:.1f}% ({rendered}/{total} models rendered successfully)
+- **Resemblance Rate:** __% (fill in after manual review)
+
+---
+
+## Model Outputs
+
+"""
+
+    for i, result in enumerate(render_results, 1):
+        markdown_content += f"### {i}. {result['name'].replace('_', ' ').title()}\n\n"
+        markdown_content += f"- **File:** `{result['filename']}`\n"
+
+        if result['rendered']:
+            markdown_content += f"- **Preview:** ![{result['name']}]({result['image']})\n"
+            markdown_content += "- **Rendered:** ✅ Success\n"
+        else:
+            markdown_content += "- **Rendered:** ❌ Failed\n"
+            markdown_content += f"- **Error:** `{result['error']}`\n"
+
+        markdown_content += "- **Quality:** __ / 5 (fill in after review)\n"
+        markdown_content += "- **Resemblance:** __ / 5 (fill in after review)\n"
+        markdown_content += "- **Notes:** _[Add your observations here]_\n\n"
+        markdown_content += "---\n\n"
+
+    markdown_content += """
+## Review Guide
+
+### Quality Rating (1-5)
+- **5:** Perfect, production-ready code
+- **4:** Good, minor improvements needed
+- **3:** Acceptable, some issues present
+- **2:** Poor, major issues
+- **1:** Broken or unusable
+
+### Resemblance Rating (1-5)
+- **5:** Perfectly matches the prompt
+- **4:** Good representation
+- **3:** Recognizable but simplified
+- **2:** Loosely related
+- **1:** Doesn't match prompt
+
+### Overall Scoring
+- Calculate average quality and resemblance scores
+- Update the "Resemblance Rate" at the top with the average resemblance score as a percentage (avg/5 * 100)
+"""
+
+    # Save markdown file
+    markdown_path = os.path.join(eval_folder, "REVIEW.md")
+    with open(markdown_path, 'w') as f:
+        f.write(markdown_content)
+
+    print(f"\n📝 Review template saved to: REVIEW.md")
 
 # ============================================================================
 # Main Training Pipeline
@@ -160,11 +470,12 @@ def main():
         FastLanguageModel.for_inference(model)
 
         print("\n✓ Model loaded! Ready for inference.")
-        print("\nExample generations:")
-        print("\n--- Sphere ---")
-        generate_code(model, tokenizer, "hey cadmonkey, create me a sphere")
-        print("\n--- Cat ---")
-        generate_code(model, tokenizer, "hey cadmonkey, create me a cat")
+
+        # Create evaluation folder and save results
+        eval_folder = create_eval_folder()
+        save_eval_results(model, tokenizer, eval_folder)
+
+        print(f"\n📂 Evaluation files saved to: {eval_folder}")
         return
 
     # Load base model
@@ -291,18 +602,19 @@ def main():
     tokenizer.save_pretrained(LORA_MODEL_DIR)
     print("   ✓ Model saved!")
 
-    # Test inference
-    print("\n🧪 Testing inference...\n")
+    # Test inference and save evaluation results
+    print("\n🧪 Running evaluation and saving results...\n")
     FastLanguageModel.for_inference(model)
 
-    print("--- Generating sphere ---")
-    generate_code(model, tokenizer, "hey cadmonkey, create me a sphere")
+    # Create evaluation folder
+    eval_folder = create_eval_folder()
 
-    print("\n--- Generating cat ---")
-    generate_code(model, tokenizer, "hey cadmonkey, create me a cat")
+    # Generate and save all evaluation examples
+    save_eval_results(model, tokenizer, eval_folder)
 
     print("\n" + "="*60)
     print("✨ All done!")
+    print(f"📂 Evaluation files saved to: {eval_folder}")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
