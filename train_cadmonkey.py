@@ -51,6 +51,12 @@ OUTPUT_DIR = "outputs"
 LORA_MODEL_DIR = "lora_model"
 EVAL_OUTPUT_DIR = "eval_outputs"
 
+# Dataset Configuration - Add or remove dataset names as needed
+DATASET_NAMES = [
+    "ThomasTheMaker/Synthetic-Object-v0",
+    "ThomasTheMaker/Synthetic-Object",
+]
+
 # OpenSCAD rendering configuration
 OPENSCAD_BINARY = "openscad"  # Change to full path if not in PATH
 RENDER_TIMEOUT = 30  # seconds per render
@@ -508,21 +514,33 @@ def main():
 
     # Load and combine datasets
     print("\n📊 Loading datasets...")
-    dataset_v0 = load_dataset("ThomasTheMaker/Synthetic-Object-v0", split="train")
-    print(f"   Dataset v0 size: {len(dataset_v0)} examples")
+    print(f"   Attempting to load {len(DATASET_NAMES)} dataset(s)...\n")
 
-    try:
-        dataset_v1 = load_dataset("ThomasTheMaker/Synthetic-Object", split="train")
-        print(f"   Dataset v1 size: {len(dataset_v1)} examples")
+    loaded_datasets = []
 
-        # Combine datasets
+    for i, dataset_name in enumerate(DATASET_NAMES, 1):
+        try:
+            print(f"   [{i}/{len(DATASET_NAMES)}] Loading: {dataset_name}...")
+            ds = load_dataset(dataset_name, split="train")
+            loaded_datasets.append(ds)
+            print(f"       ✓ Loaded {len(ds)} examples")
+        except Exception as e:
+            print(f"       ✗ Failed to load: {e}")
+            continue
+
+    if not loaded_datasets:
+        print("\n❌ Error: No datasets could be loaded!")
+        print("   Please check DATASET_NAMES configuration and network connection.")
+        return
+
+    # Combine all loaded datasets
+    if len(loaded_datasets) == 1:
+        dataset = loaded_datasets[0]
+        print(f"\n   Using single dataset: {len(dataset)} examples")
+    else:
         from datasets import concatenate_datasets
-        dataset = concatenate_datasets([dataset_v0, dataset_v1])
-        print(f"   Combined dataset size: {len(dataset)} examples")
-    except Exception as e:
-        print(f"   ⚠️  Could not load v1 dataset: {e}")
-        print(f"   Using only v0 dataset")
-        dataset = dataset_v0
+        dataset = concatenate_datasets(loaded_datasets)
+        print(f"\n   Combined {len(loaded_datasets)} datasets: {len(dataset)} total examples")
 
     print("\n🔄 Formatting dataset...")
     dataset = dataset.map(
