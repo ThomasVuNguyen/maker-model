@@ -1,0 +1,5 @@
+venv/
+unsloth*/
+outputs/
+lora_model/
+*checkpoints/
