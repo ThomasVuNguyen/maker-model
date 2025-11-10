@@ -6,7 +6,18 @@
       "Bash(sudo apt install:*)",
       "Bash(apt-cache policy:*)",
       "Bash(cat:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(./test_openscad.sh:*)",
+      "Bash(timeout 5s openscad:*)",
+      "Bash(./test_scad_syntax.sh:*)",
+      "Bash(openscad --info:*)",
+      "Bash(QT_QPA_PLATFORM=offscreen openscad:*)",
+      "Bash(LIBGL_ALWAYS_SOFTWARE=1 openscad:*)",
+      "Bash(openscad:*)",
+      "Bash(LIBGL_ALWAYS_SOFTWARE=1 QT_QPA_PLATFORM=offscreen openscad:*)",
+      "Bash(/tmp/broken.scad)",
+      "Bash(/tmp/broken2.scad)",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "ask": []
