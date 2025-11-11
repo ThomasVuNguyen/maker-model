@@ -19,7 +19,7 @@ from trl import SFTConfig, SFTTrainer
 # Configuration
 # ============================================================================
 
-MAX_SEQ_LENGTH = 2048
+MAX_SEQ_LENGTH = 4096
 DTYPE = None  # None for auto detection
 LOAD_IN_4BIT = True
 MODEL_NAME = "unsloth/Llama-3.2-1B"
@@ -44,7 +44,7 @@ LR_SCHEDULER_TYPE = "cosine"  # Cosine decay instead of linear
 # Generation Configuration
 TEMPERATURE = 0.7
 REPETITION_PENALTY = 1.1
-MAX_NEW_TOKENS = 2048  # Allow longer code generation
+MAX_NEW_TOKENS = 4096  # Allow longer code generation
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -53,8 +53,8 @@ EVAL_OUTPUT_DIR = "eval_outputs"
 
 # Dataset Configuration - Add or remove dataset names as needed
 DATASET_NAMES = [
-    "ThomasTheMaker/Synthetic-Object-v0",
-    "ThomasTheMaker/Synthetic-Object",
+    "ThomasTheMaker/Synthetic-Openscad-v1",
+    "ThomasTheMaker/Synthetic-Openscad-v0",
 ]
 
 # OpenSCAD rendering configuration
