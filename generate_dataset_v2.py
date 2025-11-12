@@ -24,7 +24,7 @@ load_dotenv()
 # Configuration
 DATASET_NAME = "ThomasTheMaker/Synthetic-Object"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"  # API model to use
-OUTPUT_FILE = "generated_dataset_v3.json"
+OUTPUT_FILE = "generated_dataset_v5.json"
 OPENSCAD_TIMEOUT = 10  # seconds
 NUM_SAMPLES = None  # Number of samples to process (set to None for all)
 MAX_RETRIES = 5  # Maximum number of regeneration attempts if validation fails

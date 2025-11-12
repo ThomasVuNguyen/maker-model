@@ -55,6 +55,8 @@ EVAL_OUTPUT_DIR = "eval_outputs"
 DATASET_NAMES = [
     "ThomasTheMaker/Synthetic-Openscad-v1",
     "ThomasTheMaker/Synthetic-Openscad-v0",
+    "ThomasTheMaker/Synthetic-Openscad-v2",
+    "ThomasTheMaker/Synthetic-Openscad-v3",
 ]
 
 # OpenSCAD rendering configuration

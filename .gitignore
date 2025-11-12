@@ -6,4 +6,5 @@ lora_model/
 .env
 tinker-env/
 __pycache__/
-generated_dataset.json
+generated_dataset*.json
+*.json
