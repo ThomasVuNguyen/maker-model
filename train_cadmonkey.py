@@ -22,7 +22,8 @@ from trl import SFTConfig, SFTTrainer
 MAX_SEQ_LENGTH = 4096
 DTYPE = None  # None for auto detection
 LOAD_IN_4BIT = True
-MODEL_NAME = "unsloth/Llama-3.2-1B"
+MODEL_NAME = "unsloth/SmolLM2-360M" 
+# "unsloth/Llama-3.2-1B"
 
 # LoRA Configuration
 LORA_R = 256
@@ -53,10 +54,10 @@ EVAL_OUTPUT_DIR = "eval_outputs"
 
 # Dataset Configuration - Add or remove dataset names as needed
 DATASET_NAMES = [
-    "ThomasTheMaker/Synthetic-Openscad-v1",
+    # "ThomasTheMaker/Synthetic-Openscad-v1",
     "ThomasTheMaker/Synthetic-Openscad-v0",
-    "ThomasTheMaker/Synthetic-Openscad-v2",
-    "ThomasTheMaker/Synthetic-Openscad-v3",
+    # "ThomasTheMaker/Synthetic-Openscad-v2",
+    # "ThomasTheMaker/Synthetic-Openscad-v3",
 ]
 
 # OpenSCAD rendering configuration
